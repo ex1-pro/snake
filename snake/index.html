@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Змейка 2.0</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #181f30;
+    --text: #e6ebf5;
+    --muted: #8b95ad;
+    --accent: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .wrap { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+  .board { position: relative; }
+  canvas {
+    display: block;
+    width: min(92vw, 480px);
+    height: auto;
+    aspect-ratio: 1;
+    background: var(--panel);
+    border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.45);
+    touch-action: none;
+  }
+  .overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; text-align: center;
+    background: rgba(15,20,32,.78);
+    border-radius: 12px;
+    backdrop-filter: blur(2px);
+  }
+  .overlay.hidden { display: none; }
+  .overlay h1 { margin: 0; font-size: 2rem; }
+  .overlay p { margin: 0; color: var(--muted); max-width: 300px; line-height: 1.4; }
+  button {
+    background: var(--accent); color: #07230f; border: 0; border-radius: 8px;
+    padding: 10px 22px; font-size: 1rem; font-weight: 600; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  aside { width: 220px; display: flex; flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border-radius: 12px; padding: 14px 16px; }
+  .card h2 { margin: 0 0 8px; font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .score { font-size: 2.2rem; font-weight: 700; }
+  .effects { display: flex; flex-direction: column; gap: 6px; min-height: 22px; font-size: .9rem; }
+  .effect { display: flex; justify-content: space-between; }
+  ol { margin: 0; padding-left: 20px; }
+  ol li { padding: 2px 0; font-variant-numeric: tabular-nums; }
+  .legend { font-size: .85rem; line-height: 1.6; color: var(--muted); }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  @media (max-width: 760px) { aside { width: min(92vw, 480px); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="board">
+    <canvas id="c" width="480" height="480"></canvas>
+    <div id="overlay" class="overlay">
+      <h1 id="ovTitle">Змейка 2.0</h1>
+      <p id="ovText">Стрелки или WASD — управление, пробел — пауза. На телефоне — свайпы.</p>
+      <button id="startBtn">Играть</button>
+    </div>
+  </div>
+  <aside>
+    <div class="card">
+      <h2>Счёт</h2>
+      <div class="score" id="score">0</div>
+    </div>
+    <div class="card">
+      <h2>Эффекты</h2>
+      <div class="effects" id="effects"><span style="color:var(--muted)">—</span></div>
+    </div>
+    <div class="card">
+      <h2>Рекорды</h2>
+      <ol id="scores"></ol>
+    </div>
+    <div class="card legend">
+      <div><span class="dot" style="background:#f87171"></span>Яблоко: +10</div>
+      <div><span class="dot" style="background:#60a5fa"></span>Замедление на 8 с</div>
+      <div><span class="dot" style="background:#fbbf24"></span>Двойные очки на 10 с</div>
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  const COLS = 20, ROWS = 20, CELL = 24;
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  const BASE_DELAY = 140, MIN_DELAY = 65;
+  const SLOW_MS = 8000, DOUBLE_MS = 10000, BONUS_LIFETIME = 7000;
+  const STORE_KEY = 'snake2-highscores';
+
+  let snake, dir, queue, apple, bonus, score, eaten;
+  let effects, state, lastTick, bonusSpawnAt;
+  // state: 'ready' | 'running' | 'paused' | 'over'
+
+  // ---------- рекорды ----------
+  function loadScores() {
+    try { return JSON.parse(localStorage.getItem(STORE_KEY)) || []; }
+    catch { return []; }
+  }
+  function saveScore(s) {
+    if (s <= 0) return;
+    const list = loadScores();
+    list.push(s);
+    list.sort((a, b) => b - a);
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(list.slice(0, 5))); } catch {}
+  }
+  function renderScores() {
+    const list = loadScores();
+    $('scores').innerHTML = list.length
+      ? list.map(s => `<li>${s}</li>`).join('')
+      : '<span style="color:var(--muted)">пока пусто</span>';
+  }
+
+  // ---------- игра ----------
+  function reset() {
+    snake = [{ x: 10, y: 10 }, { x: 9, y: 10 }, { x: 8, y: 10 }];
+    dir = { x: 1, y: 0 };
+    queue = [];
+    score = 0; eaten = 0;
+    effects = { slow: 0, double: 0 };
+    bonus = null;
+    bonusSpawnAt = performance.now() + 6000;
+    apple = freeCell();
+    updateHud();
+  }
+
+  function freeCell() {
+    const taken = new Set(snake.map(p => p.x + ',' + p.y));
+    if (apple) taken.add(apple.x + ',' + apple.y);
+    if (bonus) taken.add(bonus.x + ',' + bonus.y);
+    let p;
+    do { p = { x: rnd(COLS), y: rnd(ROWS) }; } while (taken.has(p.x + ',' + p.y));
+    return p;
+  }
+  const rnd = n => Math.floor(Math.random() * n);
+
+  function delay() {
+    let d = Math.max(MIN_DELAY, BASE_DELAY - eaten * 3);
+    if (effects.slow > 0) d *= 1.6;
+    return d;
+  }
+
+  function step(now) {
+    if (queue.length) dir = queue.shift();
+    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+    if (head.x < 0 || head.y < 0 || head.x >= COLS || head.y >= ROWS ||
+        snake.some(p => p.x === head.x && p.y === head.y)) {
+      return gameOver();
+    }
+    snake.unshift(head);
+
+    let grew = false;
+    if (head.x === apple.x && head.y === apple.y) {
+      eaten++; grew = true;
+      score += effects.double > 0 ? 20 : 10;
+      apple = freeCell();
+    } else if (bonus && head.x === bonus.x && head.y === bonus.y) {
+      if (bonus.type === 'slow') effects.slow = SLOW_MS;
+      else effects.double = DOUBLE_MS;
+      bonus = null;
+      bonusSpawnAt = now + 8000 + rnd(6000);
+    }
+    if (!grew) snake.pop();
+
+    // появление и исчезновение бонуса
+    if (bonus && now > bonus.expires) {
+      bonus = null;
+      bonusSpawnAt = now + 8000 + rnd(6000);
+    } else if (!bonus && now > bonusSpawnAt) {
+      const c = freeCell();
+      bonus = { ...c, type: Math.random() < 0.5 ? 'slow' : 'double', expires: now + BONUS_LIFETIME };
+    }
+    updateHud();
+  }
+
+  function gameOver() {
+    state = 'over';
+    saveScore(score);
+    renderScores();
+    showOverlay('Игра окончена', `Ваш счёт: ${score}`, 'Ещё раз');
+  }
+
+  function updateHud() {
+    $('score').textContent = score;
+    const rows = [];
+    if (effects.slow > 0) rows.push(`<div class="effect"><span style="color:#60a5fa">Замедление</span><span>${(effects.slow / 1000).toFixed(1)}</span></div>`);
+    if (effects.double > 0) rows.push(`<div class="effect"><span style="color:#fbbf24">×2 очки</span><span>${(effects.double / 1000).toFixed(1)}</span></div>`);
+    $('effects').innerHTML = rows.join('') || '<span style="color:var(--muted)">—</span>';
+  }
+
+  // ---------- цикл ----------
+  function loop(now) {
+    requestAnimationFrame(loop);
+    const dt = now - (loop.prev || now);
+    loop.prev = now;
+
+    if (state === 'running') {
+      if (effects.slow > 0) effects.slow = Math.max(0, effects.slow - dt);
+      if (effects.double > 0) effects.double = Math.max(0, effects.double - dt);
+      if (now - lastTick >= delay()) {
+        lastTick = now;
+        step(now);
+      }
+    }
+    draw(now);
+  }
+
+  // ---------- отрисовка ----------
+  function cell(x, y, color, inset = 1, radius = 5) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(x * CELL + inset, y * CELL + inset, CELL - inset * 2, CELL - inset * 2, radius);
+    ctx.fill();
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // сетка
+    ctx.fillStyle = 'rgba(255,255,255,.035)';
+    for (let x = 0; x < COLS; x++)
+      for (let y = 0; y < ROWS; y++)
+        if ((x + y) % 2 === 0) ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+
+    if (!snake) return;
+
+    // яблоко
+    cell(apple.x, apple.y, '#f87171', 3, 10);
+
+    // бонус (мигает перед исчезновением)
+    if (bonus) {
+      const left = bonus.expires - now;
+      if (left > 2000 || Math.floor(now / 150) % 2 === 0) {
+        cell(bonus.x, bonus.y, bonus.type === 'slow' ? '#60a5fa' : '#fbbf24', 2, 12);
+      }
+    }
+
+    // змейка
+    snake.forEach((p, i) => {
+      const t = 1 - i / Math.max(snake.length, 1) * 0.55;
+      const color = effects.double > 0
+        ? `hsl(45 90% ${40 + t * 20}%)`
+        : `hsl(142 65% ${28 + t * 28}%)`;
+      cell(p.x, p.y, color, 1, i === 0 ? 8 : 5);
+    });
+
+    // глаза
+    const h = snake[0];
+    ctx.fillStyle = '#07230f';
+    const ex = dir.x, ey = dir.y;
+    const cx = h.x * CELL + CELL / 2 + ex * 4, cy = h.y * CELL + CELL / 2 + ey * 4;
+    const ox = ey !== 0 ? 5 : 0, oy = ex !== 0 ? 5 : 0;
+    ctx.beginPath(); ctx.arc(cx - ox, cy - oy, 2.2, 0, 7); ctx.arc(cx + ox, cy + oy, 2.2, 0, 7); ctx.fill();
+  }
+
+  // ---------- управление ----------
+  function turn(nx, ny) {
+    if (state !== 'running') return;
+    const last = queue.length ? queue[queue.length - 1] : dir;
+    if (nx === -last.x && ny === -last.y) return; // нельзя развернуться на 180°
+    if (nx === last.x && ny === last.y) return;
+    if (queue.length < 3) queue.push({ x: nx, y: ny });
+  }
+
+  const KEYS = {
+    ArrowUp: [0, -1], KeyW: [0, -1],
+    ArrowDown: [0, 1], KeyS: [0, 1],
+    ArrowLeft: [-1, 0], KeyA: [-1, 0],
+    ArrowRight: [1, 0], KeyD: [1, 0],
+  };
+  addEventListener('keydown', e => {
+    if (KEYS[e.code]) { e.preventDefault(); turn(...KEYS[e.code]); return; }
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (state === 'running') pause();
+      else if (state === 'paused') resume();
+      else start();
+    }
+    if (e.code === 'Enter' && (state === 'ready' || state === 'over')) start();
+  });
+
+  // свайпы
+  let touch = null;
+  canvas.addEventListener('touchstart', e => {
+    const t = e.touches[0]; touch = { x: t.clientX, y: t.clientY };
+  }, { passive: true });
+  canvas.addEventListener('touchend', e => {
+    if (!touch) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touch.x, dy = t.clientY - touch.y;
+    touch = null;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
+    if (Math.abs(dx) > Math.abs(dy)) turn(Math.sign(dx), 0); else turn(0, Math.sign(dy));
+  }, { passive: true });
+
+  // ---------- оверлей и состояния ----------
+  function showOverlay(title, text, btn) {
+    $('ovTitle').textContent = title;
+    $('ovText').textContent = text;
+    $('startBtn').textContent = btn;
+    $('overlay').classList.remove('hidden');
+  }
+  function start() {
+    reset();
+    state = 'running';
+    lastTick = performance.now();
+    $('overlay').classList.add('hidden');
+  }
+  function pause() {
+    state = 'paused';
+    showOverlay('Пауза', 'Пробел — продолжить', 'Продолжить');
+  }
+  function resume() {
+    state = 'running';
+    lastTick = performance.now();
+    $('overlay').classList.add('hidden');
+  }
+  $('startBtn').addEventListener('click', () => (state === 'paused' ? resume() : start()));
+  document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'running') pause(); });
+
+  state = 'ready';
+  reset();
+  renderScores();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
